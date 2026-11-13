@@ -227,6 +227,9 @@ jobs:
           else
             tar czf "$NAME.tar.gz" shakespeare-speak
           fi
+          # Keep only the archive. A bare `shakespeare-speak` from every target
+          # would collide into one file when the artifacts are merged.
+          rm shakespeare-speak
           ls -l
 
       # actions/upload-artifact v7.0.2
@@ -265,6 +268,14 @@ jobs:
           REPO: ${{ github.repository }}
         run: |
           if gh release view "$TAG" --repo "$REPO" >/dev/null 2>&1; then
+            # Drop assets that are no longer produced, so a re-run converges
+            # instead of accumulating stale files.
+            for asset in $(gh release view "$TAG" --repo "$REPO" \
+              --json assets -q '.assets[].name'); do
+              if [ ! -f "dist/$asset" ]; then
+                gh release delete-asset "$TAG" "$asset" --repo "$REPO" --yes
+              fi
+            done
             gh release upload "$TAG" dist/* --clobber --repo "$REPO"
           else
             gh release create "$TAG" dist/* \
