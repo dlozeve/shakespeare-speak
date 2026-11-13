@@ -14,19 +14,24 @@ env:
   CARGO_TERM_COLOR: always
   CARGO_INCREMENTAL: "0"
 
-# Only GitHub-maintained actions are used, so there is no third-party action to
-# pin. For a stricter supply chain, pin the `uses:` lines below to commit SHAs.
+# Every action is pinned to a commit SHA, with the tag it came from noted above
+# the step. A moved tag cannot change what runs here; bump the SHAs on purpose.
+#
+# The cargo cache is restored on every run but only saved on `push`, so a pull
+# request cannot poison the cache that a release build later restores.
 
 jobs:
   test:
     name: Test
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      # actions/checkout v7.0.1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
 
       # The corpus is compiled into the binary, so a checkout without it cannot
-      # build. Fail early with a clear message instead of a confusing build.rs
-      # panic.
+      # build. Fail early with a clear message instead of a build.rs panic.
       - name: Check the corpus is committed
         run: |
           count=$(find data/works -name '*.txt' 2>/dev/null | wc -l)
@@ -41,19 +46,32 @@ jobs:
           rustup toolchain install stable --profile minimal -c rustfmt -c clippy
           rustup default stable
 
-      - name: Cache cargo
-        uses: actions/cache@v4
+      # actions/cache v6.1.0
+      - name: Restore cargo cache
+        id: cargo-cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
         with:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
             target
-          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          key: ${{ runner.os }}-cargo-${{ hashFiles('Cargo.lock') }}
           restore-keys: ${{ runner.os }}-cargo-
 
       - run: cargo fmt --all --check
       - run: cargo clippy --locked --all-targets -- -D warnings
       - run: cargo test --locked --all-targets
+
+      # actions/cache v6.1.0
+      - name: Save cargo cache
+        if: github.event_name == 'push'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ steps.cargo-cache.outputs.cache-primary-key }}
 
   build:
     name: ${{ matrix.target }}
@@ -69,14 +87,14 @@ jobs:
           - target: aarch64-unknown-linux-musl
             os: ubuntu-latest
             archive: tar.gz
-          - target: x86_64-apple-darwin
-            os: macos-latest
-            archive: zip
           - target: aarch64-apple-darwin
             os: macos-latest
             archive: zip
     steps:
-      - uses: actions/checkout@v4
+      # actions/checkout v7.0.1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
 
       - name: Check the corpus is committed
         run: |
@@ -92,8 +110,10 @@ jobs:
           rustup default stable
           rustup target add ${{ matrix.target }}
 
-      - name: Cache cargo
-        uses: actions/cache@v4
+      # actions/cache v6.1.0
+      - name: Restore cargo cache
+        id: cargo-cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
         with:
           path: |
             ~/.cargo/registry
@@ -108,24 +128,48 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y musl-tools
 
-      # musl.cc ships a ready-made cross toolchain; Ubuntu has no
-      # aarch64-musl-gcc package.
-      - name: Install musl cross toolchain (aarch64)
+      # Ubuntu has no aarch64-musl-gcc, and musl.cc is frequently unreachable
+      # from Actions runners. Zig ships a complete aarch64 musl toolchain, and
+      # cargo-zigbuild drives it, so nothing has to be built from source.
+      - name: Install zig and cargo-zigbuild (aarch64)
         if: matrix.target == 'aarch64-unknown-linux-musl'
         run: |
-          URL=https://musl.cc/aarch64-linux-musl-cross.tgz
-          curl -fsSL "$URL" -o /tmp/musl-cross.tgz
-          sudo tar xzf /tmp/musl-cross.tgz -C /opt
-          echo "/opt/aarch64-linux-musl-cross/bin" >> "$GITHUB_PATH"
+          ZIG=0.17.1
+          ZIG_DIR="zig-x86_64-linux-$ZIG"
+          curl -fsSL "https://ziglang.org/download/$ZIG/$ZIG_DIR.tar.xz" \
+            | sudo tar xJ -C /opt
+          echo "/opt/$ZIG_DIR" >> "$GITHUB_PATH"
+
+          CZB=0.24.1
+          CZB_DIR="cargo-zigbuild-x86_64-unknown-linux-gnu"
+          CZB_URL="https://github.com/rust-cross/cargo-zigbuild/releases"
+          CZB_URL="$CZB_URL/download/v$CZB/$CZB_DIR.tar.xz"
+          curl -fsSL "$CZB_URL" | sudo tar xJ -C /opt
+          echo "/opt/$CZB_DIR" >> "$GITHUB_PATH"
 
       - name: Build
         env:
           # rustls pulls in ring, which compiles C, so the C compiler has to
-          # match the target libc.
+          # match the target libc. Zig supplies its own for aarch64.
           CC_x86_64_unknown_linux_musl: musl-gcc
-          CC_aarch64_unknown_linux_musl: aarch64-linux-musl-gcc
-          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER: aarch64-linux-musl-gcc
-        run: cargo build --release --locked --target ${{ matrix.target }}
+        run: |
+          if [ "${{ matrix.target }}" = "aarch64-unknown-linux-musl" ]; then
+            cargo-zigbuild zigbuild --release --locked \
+              --target ${{ matrix.target }}
+          else
+            cargo build --release --locked --target ${{ matrix.target }}
+          fi
+
+      # actions/cache v6.1.0
+      - name: Save cargo cache
+        if: github.event_name == 'push'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ steps.cargo-cache.outputs.cache-primary-key }}
 
       - name: Verify the Linux binary is static
         if: contains(matrix.target, 'linux')
@@ -133,7 +177,7 @@ jobs:
           BIN="target/${{ matrix.target }}/release/shakespeare-speak"
           file "$BIN"
           if ! file "$BIN" | grep -q "static"; then
-            echo "::error::${{ matrix.target }} binary is not statically linked"
+            echo "::error::${{ matrix.target }} is not statically linked"
             exit 1
           fi
 
@@ -141,20 +185,31 @@ jobs:
         if: matrix.target == 'aarch64-unknown-linux-musl'
         run: |
           sudo apt-get update
-          sudo apt-get install -y qemu-user-static
+          # qemu-user-static is a virtual package on current Ubuntu and is
+          # provided by qemu-user-binfmt. Fall back through the older names.
+          sudo apt-get install -y qemu-user-binfmt \
+            || sudo apt-get install -y qemu-user-static \
+            || sudo apt-get install -y qemu-user
+          ls /usr/bin/qemu-aarch64* 2>/dev/null || true
 
       # Run from /tmp so the process cannot fall back on a data/ directory.
-      # The Intel macOS binary is built on an arm64 runner and is not executed
-      # here; it would need Rosetta, which is not guaranteed to be installed.
       - name: Smoke test
-        if: matrix.target != 'x86_64-apple-darwin'
         run: |
           DIR="$GITHUB_WORKSPACE/target/${{ matrix.target }}/release"
           BIN="$DIR/shakespeare-speak"
-          case "${{ matrix.target }}" in
-            aarch64-unknown-linux-musl) RUN="qemu-aarch64-static $BIN" ;;
-            *) RUN="$BIN" ;;
-          esac
+
+          if [ "${{ matrix.target }}" = "aarch64-unknown-linux-musl" ]; then
+            if command -v qemu-aarch64-static >/dev/null 2>&1; then
+              RUN="qemu-aarch64-static $BIN"
+            elif command -v qemu-aarch64 >/dev/null 2>&1; then
+              RUN="qemu-aarch64 $BIN"
+            else
+              # binfmt_misc is registered, so the kernel runs it directly.
+              RUN="$BIN"
+            fi
+          else
+            RUN="$BIN"
+          fi
 
           cd /tmp
           OUT=$($RUN --search "at one fell swoop")
@@ -174,8 +229,46 @@ jobs:
           fi
           ls -l
 
-      - uses: actions/upload-artifact@v4
+      # actions/upload-artifact v7.0.2
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
         with:
           name: shakespeare-speak-${{ matrix.target }}
           path: dist/*
           if-no-files-found: error
+
+  release:
+    name: Release
+    needs: build
+    # Tag pushes only; `on.push.tags` above is what lets this run at all.
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      # actions/download-artifact v8.0.2
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Checksums
+        run: |
+          cd dist
+          sha256sum * > SHA256SUMS
+          cat SHA256SUMS
+
+      # Re-running a tag must not fail, so upload over an existing release.
+      - name: Publish the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+          REPO: ${{ github.repository }}
+        run: |
+          if gh release view "$TAG" --repo "$REPO" >/dev/null 2>&1; then
+            gh release upload "$TAG" dist/* --clobber --repo "$REPO"
+          else
+            gh release create "$TAG" dist/* \
+              --repo "$REPO" \
+              --title "$TAG" \
+              --generate-notes
+          fi

@@ -43,20 +43,23 @@ fn main() {
     for path in &paths {
         println!("cargo:rerun-if-changed={}", path.display());
 
-        // `include_str!` resolves relative to the generated file in OUT_DIR, so
-        // the path has to be absolute.
-        let absolute = std::fs::canonicalize(path)
-            .unwrap_or_else(|error| panic!("cannot resolve {}: {error}", path.display()));
         let slug = path
             .file_stem()
             .map(|stem| stem.to_string_lossy().into_owned())
             .unwrap_or_default();
 
+        // `include_str!` in the generated file resolves relative to OUT_DIR, so
+        // the path has to be anchored. Anchor it to CARGO_MANIFEST_DIR rather
+        // than a canonicalised absolute path: a cross-compile runs this script
+        // in a container where the project is mounted somewhere else, and an
+        // absolute path baked in there would not resolve on the next build.
+        let relative = path.to_string_lossy().replace('\\', "/");
+
         writeln!(
             out,
-            "    ({:?}, include_str!({:?})),",
+            "    ({:?}, include_str!(concat!(env!(\"CARGO_MANIFEST_DIR\"), {:?}))),",
             slug,
-            absolute.display().to_string()
+            format!("/{relative}")
         )
         .expect("writing to a String cannot fail");
     }
