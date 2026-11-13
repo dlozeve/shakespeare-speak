@@ -267,19 +267,16 @@ jobs:
           TAG: ${{ github.ref_name }}
           REPO: ${{ github.repository }}
         run: |
-          if gh release view "$TAG" --repo "$REPO" >/dev/null 2>&1; then
-            # Drop assets that are no longer produced, so a re-run converges
-            # instead of accumulating stale files.
-            for asset in $(gh release view "$TAG" --repo "$REPO" \
-              --json assets -q '.assets[].name'); do
-              if [ ! -f "dist/$asset" ]; then
-                gh release delete-asset "$TAG" "$asset" --repo "$REPO" --yes
-              fi
-            done
-            gh release upload "$TAG" dist/* --clobber --repo "$REPO"
-          else
-            gh release create "$TAG" dist/* \
-              --repo "$REPO" \
-              --title "$TAG" \
-              --generate-notes
+          ls -la dist
+          if [ -z "$(ls -A dist)" ]; then
+            echo "::error::no artifacts in dist/ to publish"
+            exit 1
           fi
+
+          # Recreate rather than patch: the asset list then always matches
+          # dist/ exactly, and a re-run cannot leave stale files behind.
+          gh release delete "$TAG" --repo "$REPO" --yes >/dev/null 2>&1 || true
+          gh release create "$TAG" dist/* \
+            --repo "$REPO" \
+            --title "$TAG" \
+            --generate-notes
